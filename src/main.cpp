@@ -333,18 +333,17 @@ inline void do_not_optimize(T const& val) {
 
 int main() {
     // auto keys = generate_simple_keys(2000);
-    auto keys_1 = generate_random_keys(4000, 6);
+    auto keys = generate_random_keys(2000, 6);
 
     constexpr auto table_bits = 19; // 超过20 会有段错误
     auto mapper = UltraCompactMapper<table_bits>{};
     // auto mapper = std::make_unique<UltraCompactMapper<20>>();
-    mapper.build(keys_1, 2'0000'0000);
+    mapper.build(keys, 2'0000'0000);
 
-    auto keys_2 = generate_random_keys(4000, 6);
 
     uint32_t aux;
     uint64_t start = __rdtscp(&aux);
-    for(auto& k2:keys_2) {
+    for(auto& k2:keys) {
         do_not_optimize(mapper.get(k2.c_str()));
     }
     uint64_t end = __rdtscp(&aux);
@@ -352,17 +351,17 @@ int main() {
 
 
 
-    // auto u_map = unordered_dense::set<string>{};
-    // for(auto& k2:keys_2) {
-    //     u_map.emplace(move(k2));
-    // }
+    auto u_map = unordered_dense::set<string>{};
+    for(auto& k2:keys) {
+        u_map.emplace(move(k2));
+    }
 
-    // start = __rdtscp(&aux);
-    // for(auto& k2:keys_2) {
-    //     do_not_optimize(u_map.find(k2));
-    // }
-    // end = __rdtscp(&aux);
-    // cout << end - start << endl;
+    start = __rdtscp(&aux);
+    for(auto& k2:keys) {
+        do_not_optimize(u_map.find(k2));
+    }
+    end = __rdtscp(&aux);
+    cout << end - start << endl;
 
     return 0;
 }
