@@ -146,12 +146,6 @@ namespace shm_pm {
                 value_table = reinterpret_cast<PaddedValue<T, ALIGN>*>(mapped_address + header->offset_values);
             }
 
-            // [只读] 极速获取，无锁，返回 const T*
-            // 完美哈希查找过程：
-            // 计算 key 的哈希
-            // 定位 bucket，获取 seed (control_table)
-            // 再次哈希 (h ^ seed) 定位 slot
-            // 校验 key 是否匹配
             __attribute__((always_inline)) const T* get(uint64_t key) const {
                 uint64_t h = HashCore::hash_one_pass(key);
                 uint64_t bucket_idx = h >> header->bucket_shift;
