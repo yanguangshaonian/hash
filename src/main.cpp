@@ -12,6 +12,9 @@
 
 using namespace std;
 
+
+const size_t N = 2000000;
+
 // ---------------------------------------------------------
 // 辅助函数：防止编译器优化掉读操作
 // ---------------------------------------------------------
@@ -34,7 +37,7 @@ std::vector<uint64_t> get_random_int64_list(size_t n) {
         uint64_t k = rng();
         if (k == 0 || k == shm_pm::EMPTY_KEY)
             continue;
-        k %= 200'0000;
+        k %= 1000'0000;
 
         v_set.insert(k);
     }
@@ -47,7 +50,6 @@ std::vector<uint64_t> get_random_int64_list(size_t n) {
 }
 
 int test1() {
-    const size_t N = 10000;
     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
 
     std::vector<std::pair<uint64_t, MarketData>> inputs;
@@ -75,11 +77,13 @@ int test1() {
 
     uint64_t found_cnt = 0;
     double v = 0.0;
-    for (auto k : lookups) {
-        auto res = view.get(k);
-        if (__builtin_expect(res->key == k, 1)) {
-            found_cnt++;
-            v += res->value.volume;
+    for(auto i=0; i<10; i +=1) {
+        for (auto k : lookups) {
+            auto res = view.get(k);
+            if (__builtin_expect(res->key == k, 1)) {
+                found_cnt++;
+                v += res->value.volume;
+            }
         }
     }
     do_not_optimize(v);
@@ -88,7 +92,7 @@ int test1() {
     auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_lookup - start_lookup).count();
 
     // 报告
-    double latency = (double) elapsed_ns / N;
+    double latency = (double) elapsed_ns / N / 10;
 
     std::cout << "========================================" << std::endl;
     std::cout << "Lookup Count : " << N << std::endl;
@@ -109,7 +113,6 @@ int test1() {
 }
 
 int test3() {
-    const size_t N = 10000;
     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
 
     auto u_map = ankerl::unordered_dense::map<uint64_t, MarketData>{};
@@ -132,11 +135,13 @@ int test3() {
 
     uint64_t found_cnt = 0;
     double v = 0.0;
-    for (uint64_t k : lookups) {
-        auto p = u_map.find(k);
-        if (p != u_map.end()) {
-            found_cnt++;
-            v += p->second.volume;
+    for(auto i=0; i<10; i +=1) {
+        for (uint64_t k : lookups) {
+            auto p = u_map.find(k);
+            if (p != u_map.end()) {
+                found_cnt++;
+                v += p->second.volume;
+            }
         }
     }
     do_not_optimize(v);
@@ -145,7 +150,7 @@ int test3() {
     auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_lookup - start_lookup).count();
 
     // 报告
-    double latency = (double) elapsed_ns / N;
+    double latency = (double) elapsed_ns / N / 10;
 
     std::cout << "========================================" << std::endl;
     std::cout << "Lookup Count : " << N << std::endl;

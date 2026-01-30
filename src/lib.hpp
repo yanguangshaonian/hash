@@ -293,7 +293,7 @@ namespace shm_pm {
             }
 
             // =========================================================
-            //  [修复] 数据校验(修复了下标从1开始漏查第0个的问题)
+            //  数据校验
             // =========================================================
             bool check_data_validity(const std::vector<std::pair<uint64_t, T>>& data) {
                 if(data.empty())
@@ -308,7 +308,7 @@ namespace shm_pm {
 
                 // [修复] 独立检查 EMPTY_KEY(~0ULL 排序后一定在末尾)
                 if(keys.back() == EMPTY_KEY) {
-                    log_msg("ERROR", "输入数据包含保留的 EMPTY_KEY(~0ULL)，无法存储！");
+                    log_msg("ERROR", "输入数据包含保留的 EMPTY_KEY(~0ULL)，无法存储! ");
                     return false;
                 }
 
@@ -333,7 +333,7 @@ namespace shm_pm {
                 for(size_t i = 1; i < hashes.size(); i += 1) {
                     if(hashes[i] == hashes[i - 1]) {
                         log_msg("ERROR",
-                                "致命错误: 检测到哈希碰撞！不同的 Key 产生了相同的 Hash 值。请更换 Hash 函数。");
+                                "致命错误: 检测到哈希碰撞! 不同的 Key 产生了相同的 Hash 值。请更换 Hash 函数。");
                         return false;
                     }
                 }
@@ -439,7 +439,7 @@ namespace shm_pm {
                         std::vector<uint64_t> proposed_slots;
                         proposed_slots.reserve(bucket.data_indices.size());
 
-                        auto max_bucket_attempts = 65536;
+                        auto max_bucket_attempts = 1048576;
 
                         for(auto attempt = 0; attempt < max_bucket_attempts; attempt+=1) {
                             uint64_t seed = rng();

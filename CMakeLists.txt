@@ -11,3 +11,4 @@ include_directories(lib)
 add_compile_options(-mwaitpkg)
 
 add_executable(main src/main.cpp)
+add_executable(l3_test src/l3_test.cpp)
