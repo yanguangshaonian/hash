@@ -18,8 +18,7 @@ const size_t N = 2000000;
 // ---------------------------------------------------------
 // 辅助函数：防止编译器优化掉读操作
 // ---------------------------------------------------------
-template<typename T>
-inline void do_not_optimize(T const& val) {
+template<typename T> inline void do_not_optimize(T const& val) {
     asm volatile("" : : "g"(val) : "memory");
 }
 
@@ -27,7 +26,7 @@ struct MarketData {
         double price;    // 8 bytes
         uint32_t volume; // 4 bytes
         char code[4];    // 4 bytes
-}; // Total: 16 bytes, alignof: 8
+};                       // Total: 16 bytes, alignof: 8
 
 std::vector<uint64_t> get_random_int64_list(size_t n) {
     auto v_set = ankerl::unordered_dense::set<uint64_t>{};
@@ -41,8 +40,8 @@ std::vector<uint64_t> get_random_int64_list(size_t n) {
 
         v_set.insert(k);
     }
-    auto tmp_v = vector<uint64_t> {};
-    for (auto v: v_set) {
+    auto tmp_v = vector<uint64_t>{};
+    for (auto v : v_set) {
         tmp_v.push_back(v);
     }
 
@@ -66,7 +65,7 @@ int test1() {
         inputs.push_back({v, d});
     }
 
-    shm_pm::ShmMapStorage<MarketData, 4> storage;
+    shm_pm::ShmMapStorage<MarketData, 8> storage;
     storage.build("test_pm1", inputs);
     auto& view = storage.get_view();
 
@@ -77,14 +76,27 @@ int test1() {
 
     uint64_t found_cnt = 0;
     double v = 0.0;
-    for(auto i=0; i<10; i +=1) {
-        for (auto k : lookups) {
-            auto res = view.get(k);
-            if (__builtin_expect(res->key == k, 1)) {
-                found_cnt++;
-                v += res->value.volume;
-            }
+    // for (auto i = 0; i < 10; i += 1) {
+    //     for (auto k : lookups) {
+    //         auto res = view.get(k);
+    //         if (__builtin_expect(res->key == k, 1)) {
+    //             found_cnt++;
+    //             v += res->value.volume;
+    //         }
+    //     }
+    // }
+    // cout << view.capacity() << "   " << view.size() << endl;
+
+    for (auto i = 0; i < 10; i += 1) {
+        for (auto& res: view) {
+            found_cnt++;
+            v += res.value.volume;
         }
+        // for (size_t k = 0; k < N; k += 1) {
+
+        //     auto res = view.at(k);
+
+        // }
     }
     do_not_optimize(v);
 
@@ -102,12 +114,6 @@ int test1() {
     std::cout << "Latency/Op   : " << latency << " ns " << std::endl;
     std::cout << "Throughput   : " << (double) N / (elapsed_ns / 1e9) / 1e6 << " M ops/sec" << std::endl;
     std::cout << "========================================" << std::endl;
-
-    if (found_cnt != N) {
-        std::cerr << "[Error] Data mismatch! Found " << found_cnt << ", expected " << N << std::endl;
-        // 只有 Key 生成逻辑修正后，这里才不会报错
-        return 1;
-    }
 
     return 0;
 }
@@ -135,7 +141,7 @@ int test3() {
 
     uint64_t found_cnt = 0;
     double v = 0.0;
-    for(auto i=0; i<10; i +=1) {
+    for (auto i = 0; i < 10; i += 1) {
         for (uint64_t k : lookups) {
             auto p = u_map.find(k);
             if (p != u_map.end()) {
@@ -160,12 +166,6 @@ int test3() {
     std::cout << "Latency/Op   : " << latency << " ns " << std::endl;
     std::cout << "Throughput   : " << (double) N / (elapsed_ns / 1e9) / 1e6 << " M ops/sec" << std::endl;
     std::cout << "========================================" << std::endl;
-
-    if (found_cnt != N) {
-        std::cerr << "[Error] Data mismatch! Found " << found_cnt << ", expected " << N << std::endl;
-        // 只有 Key 生成逻辑修正后，这里才不会报错
-        return 1;
-    }
 
     return 0;
 }

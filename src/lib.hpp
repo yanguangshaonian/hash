@@ -36,17 +36,17 @@ namespace shm_pm {
     constexpr uint64_t EMPTY_KEY = ~0ULL;
     constexpr uint64_t GOLDEN_RATIO_64 = 0x9e3779b97f4a7c15ULL;
 
-    inline uint64_t align_to_huge_page(uint64_t size) {
+    __attribute__((always_inline)) inline uint64_t align_to_huge_page(uint64_t size) {
         return (size + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
     }
 
-    inline uint64_t align_to_cache_line(uint64_t size) {
+    __attribute__((always_inline)) inline uint64_t align_to_cache_line(uint64_t size) {
         return (size + CACHE_LINE_SIZE - 1) & ~(CACHE_LINE_SIZE - 1);
     }
 
     namespace HashCore {
         __attribute__((always_inline)) inline uint64_t hash_one_pass(uint64_t k) {
-            return (k * GOLDEN_RATIO_64);
+            return k * GOLDEN_RATIO_64;
         }
     } // namespace HashCore
 
@@ -104,6 +104,8 @@ namespace shm_pm {
 
             // 内存偏移量(相对于基地址)
             uint64_t offset_control;
+            // 指向下标映射表
+            uint64_t offset_index_map;
             uint64_t offset_slots;
 
             // 文件元数据
@@ -123,30 +125,63 @@ namespace shm_pm {
 
             // 指针缓存
             const uint32_t* __restrict control_table = nullptr;
+            const uint32_t* __restrict index_map = nullptr;
             const PaddedSlot<T, ALIGN>* __restrict slot_table = nullptr;
 
             // 本地缓存数据
             uint32_t local_bucket_shift = 0;
-            uint64_t local_slot_mask = 0;
+            uint32_t local_slot_mask = 0;
 
         public:
+            class Iterator {
+                public:
+                    const SharedMapView* view;
+                    size_t index;
+                    const PaddedSlot<T, ALIGN>& operator*() const {
+                        return *view->at(index);
+                    }
+                    Iterator& operator++() {
+                        index+=1;
+                        return *this;
+                    }
+                    bool operator!=(const Iterator& other) const {
+                        return index != other.index;
+                    }
+            };
+
+            Iterator begin() const {
+                return Iterator{this, 0};
+            }
+
+            Iterator end() const {
+                return Iterator{this, this->size()};
+            }
+
             void init(uint8_t* mapped_address) {
                 base_ptr = mapped_address;
                 header = reinterpret_cast<const ShmMapHeader*>(base_ptr);
 
                 // 缓存热点元数据
                 local_bucket_shift = header->bucket_shift;
-                local_slot_mask = header->slot_mask;
+                local_slot_mask = static_cast<uint32_t>(header->slot_mask);
 
                 control_table = reinterpret_cast<const uint32_t*>(base_ptr + header->offset_control);
+                if (header->offset_index_map > 0) {
+                    index_map = reinterpret_cast<const uint32_t*>(base_ptr + header->offset_index_map);
+                }
                 // 直接定位到 Slot 数组
                 slot_table = reinterpret_cast<const PaddedSlot<T, ALIGN>*>(base_ptr + header->offset_slots);
             }
 
             __attribute__((always_inline)) const PaddedSlot<T, ALIGN>* get(uint64_t key) const {
                 auto h = HashCore::hash_one_pass(key);
-                auto seed = control_table[h >> local_bucket_shift];
-                auto slot_idx = (h ^ seed) & local_slot_mask;
+                uint32_t seed = control_table[h >> local_bucket_shift];
+                uint32_t slot_idx = (static_cast<uint32_t>(h) ^ seed) & local_slot_mask;
+                return &slot_table[slot_idx];
+            }
+
+            __attribute__((always_inline)) const PaddedSlot<T, ALIGN>* at(size_t idx) const {
+                uint32_t slot_idx = index_map[idx];
                 return &slot_table[slot_idx];
             }
 
@@ -269,17 +304,19 @@ namespace shm_pm {
                 public:
                     bool success = false;
                     uint64_t bucket_mask = 0;
-                    uint64_t slot_mask = 0;
+                    uint32_t slot_mask = 0;
                     uint32_t bucket_shift = 0;
                     std::vector<uint32_t> control;
+                    std::vector<uint32_t> index_map;
                     std::vector<uint64_t> keys;
                     std::vector<size_t> value_indices;
             };
 
             static uint64_t next_pow2(uint64_t x) {
-                if (x == 0)
+                if (x == 0) {
                     return 1;
-                x--;
+                }
+                x -= 1;
                 x |= x >> 1;
                 x |= x >> 2;
                 x |= x >> 4;
@@ -293,8 +330,9 @@ namespace shm_pm {
             //  数据校验
             // =========================================================
             bool check_data_validity(const std::vector<std::pair<uint64_t, T>>& data) {
-                if (data.empty())
+                if (data.empty()) {
                     return true;
+                }
 
                 std::vector<uint64_t> keys;
                 keys.reserve(data.size());
@@ -303,7 +341,7 @@ namespace shm_pm {
                 }
                 std::sort(keys.begin(), keys.end());
 
-                // [修复] 独立检查 EMPTY_KEY(~0ULL 排序后一定在末尾)
+                // 独立检查 EMPTY_KEY ~0ULL 排序后一定在末尾
                 if (keys.back() == EMPTY_KEY) {
                     log_msg("ERROR", "输入数据包含保留的 EMPTY_KEY(~0ULL)，无法存储! ");
                     return false;
@@ -343,8 +381,9 @@ namespace shm_pm {
             // =========================================================
             BuildResult build_perfect_hash_tables(const std::vector<std::pair<uint64_t, T>>& data) {
                 auto n = data.size();
-                if (n == 0)
+                if (n == 0) {
                     return {};
+                }
 
                 if (!check_data_validity(data)) {
                     return {};
@@ -417,6 +456,7 @@ namespace shm_pm {
 
                     // 初始化结果集
                     res.control.assign(bucket_cnt, 0);
+                    res.index_map.resize(n);
                     res.keys.assign(slot_cnt, EMPTY_KEY);
                     res.value_indices.assign(slot_cnt, SIZE_MAX);
 
@@ -429,8 +469,9 @@ namespace shm_pm {
 
                     // 为每个桶寻找 Perfect Seed
                     for (const auto& bucket : buckets) {
-                        if (bucket.data_indices.empty())
+                        if (bucket.data_indices.empty()) {
                             continue;
+                        }
 
                         bool found_seed = false;
                         std::vector<uint64_t> proposed_slots;
@@ -464,8 +505,9 @@ namespace shm_pm {
                                         break;
                                     }
 
-                                if (collision)
+                                if (collision) {
                                     break;
+                                }
                                 proposed_slots.push_back(s_idx);
                             }
 
@@ -480,6 +522,7 @@ namespace shm_pm {
                                     slot_used[s_idx] = true;
                                     res.keys[s_idx] = data[original_idx].first;
                                     res.value_indices[s_idx] = original_idx;
+                                    res.index_map[original_idx] = static_cast<uint32_t>(s_idx);
                                 }
                                 found_seed = true;
                                 break;
@@ -515,8 +558,9 @@ namespace shm_pm {
             }
 
             bool try_create_new(const std::vector<std::pair<uint64_t, T>>& data) {
-                if (data.empty())
+                if (data.empty()) {
                     return false;
+                }
                 auto build_res = build_perfect_hash_tables(data);
                 if (!build_res.success) {
                     log_msg("ERROR", "完美哈希构建失败");
@@ -526,10 +570,12 @@ namespace shm_pm {
                 // 计算内存布局: Header + Control + Slots(Key+Value)
                 size_t header_sz = align_to_cache_line(sizeof(ShmMapHeader));
                 size_t ctrl_sz = align_to_cache_line(build_res.control.size() * sizeof(uint32_t));
+                size_t idx_map_sz = align_to_cache_line(build_res.index_map.size() * sizeof(uint32_t));
+
                 // Key 表消失了, 合并进了 Slot
                 size_t slots_sz = align_to_cache_line(build_res.keys.size() * sizeof(SlotType));
 
-                size_t total_sz = header_sz + ctrl_sz + slots_sz;
+                size_t total_sz = header_sz + ctrl_sz + idx_map_sz + slots_sz;
                 size_t aligned_file_sz = align_to_huge_page(total_sz);
 
                 size_t waste_sz = aligned_file_sz - total_sz;
@@ -600,11 +646,16 @@ namespace shm_pm {
                 hdr->slot_size = sizeof(SlotType);
 
                 hdr->offset_control = header_sz;
-                hdr->offset_slots = header_sz + ctrl_sz; // 直接指向 Slot 数组
+                hdr->offset_index_map = header_sz + ctrl_sz;
+                hdr->offset_slots = header_sz + ctrl_sz + idx_map_sz;
 
                 // 写入 Control
                 std::memcpy(this->mapped_ptr + hdr->offset_control, build_res.control.data(),
                             build_res.control.size() * sizeof(uint32_t));
+
+                // 写入 Index Map
+                std::memcpy(this->mapped_ptr + hdr->offset_index_map, build_res.index_map.data(),
+                            build_res.index_map.size() * sizeof(uint32_t));
 
                 // 写入 Slots(Key + Value)
                 auto* slot_ptr = reinterpret_cast<SlotType*>(this->mapped_ptr + hdr->offset_slots);
@@ -642,22 +693,27 @@ namespace shm_pm {
 
         public:
             bool build(std::string name, const std::vector<std::pair<uint64_t, T>>& init_data = {}) {
-                if (geteuid() != 0)
+                if (geteuid() != 0) {
                     throw std::runtime_error("需要 Root 权限(HugePage)");
+                }
+
                 this->storage_name = name;
 
                 for (auto i = 0; i < 3; i += 1) {
                     auto join_res = try_join_existing();
-                    if (join_res == JoinResult::SUCCESS)
+                    if (join_res == JoinResult::SUCCESS) {
                         return true;
-                    if (join_res == JoinResult::TYPE_MISMATCH)
+                    }
+                    if (join_res == JoinResult::TYPE_MISMATCH) {
                         throw std::runtime_error("数据结构版本不匹配");
+                    }
                     if (join_res == JoinResult::DATA_CORRUPT) {
                         log_msg("WARN", "文件损坏, 重置中...");
                         continue;
                     }
-                    if (try_create_new(init_data))
+                    if (try_create_new(init_data)) {
                         return false;
+                    }
                     if (errno == EEXIST) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(20));
                         continue;
@@ -667,15 +723,17 @@ namespace shm_pm {
                 throw std::runtime_error("初始化超时");
             }
 
-            inline SharedMapView<T, ALIGN>& get_view() {
+            __attribute__((always_inline)) inline SharedMapView<T, ALIGN>& get_view() {
                 return this->view;
             }
 
             ~ShmMapStorage() {
-                if (this->mapped_ptr)
+                if (this->mapped_ptr) {
                     munmap(this->mapped_ptr, this->mapped_size);
-                if (shm_fd != -1)
+                }
+                if (shm_fd != -1) {
                     close(shm_fd);
+                }
             }
     };
 } // namespace shm_pm
