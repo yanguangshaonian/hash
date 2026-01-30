@@ -332,480 +332,420 @@
 
 
 
+// #include <iomanip>
+// #include <iostream>
+// #include <vector>
+// #include <algorithm>
+// #include <cstring>
+// #include <cstdint>
+// #include <random>
+// #include <chrono>
+// #include <type_traits>
+// #include <stdexcept>
+// #include <immintrin.h> // SIMD
+// #include <sys/mman.h>  // 为了使用 madvise/hugepages
 
-/**
- * 编译建议: g++ -O3 -std=c++17 -march=native -funroll-loops main.cpp -o extreme_map
- */
 
-#include <iomanip>
-#include <iostream>
-#include <vector>
-#include <algorithm>
-#include <cstring>
-#include <cstdint>
-#include <random>
-#include <chrono>
-#include <type_traits>
-#include <stdexcept>
-#include <immintrin.h> // SIMD
-#include <sys/mman.h>  // 为了使用 madvise/hugepages
+// namespace HashCore {
+//     __attribute__((always_inline)) inline uint64_t hash_one_pass(uint64_t k) {
+//         k ^= k >> 33;
+//         k *= 0xff51afd7ed558ccdULL;
+//         k ^= k >> 33;
+//         k *= 0xc4ceb9fe1a85ec53ULL;
+//         k ^= k >> 33;
+//         return k;
+//     }
+// }
 
-// -----------------------------------------------------------------------------
-// 极致哈希函数 (基于 MumurHash3 Finalizer 或 WyHash 核心)
-// -----------------------------------------------------------------------------
-namespace HashCore {
-    // 既然只有一次哈希，必须保证质量极高，这里使用 Murmur3 的 64-bit finalizer 变体
-    // 这比简单的乘法混合抗碰撞性更强，但现代 CPU 上依然只有 2-3 个周期
-    __attribute__((always_inline)) inline uint64_t hash_one_pass(uint64_t k) {
-        k ^= k >> 33;
-        k *= 0xff51afd7ed558ccdULL;
-        k ^= k >> 33;
-        k *= 0xc4ceb9fe1a85ec53ULL;
-        k ^= k >> 33;
-        return k;
-    }
-}
+// template<typename T>
+// class ExtremePerfectMap {
+// public:
+//     static_assert(std::is_trivially_copyable_v<T>, "T must be POD");
 
-// -----------------------------------------------------------------------------
-// 极致性能：单次哈希 + XOR 位移 + SoA 布局
-// -----------------------------------------------------------------------------
-template<typename T>
-class ExtremePerfectMap {
-public:
-    static_assert(std::is_trivially_copyable_v<T>, "T must be POD");
+//     struct Header {
+//         uint64_t bucket_mask;      // Control Table 的掩码 (size - 1)
+//         uint64_t slot_mask;        // Data Table 的掩码 (size - 1)
+//         uint32_t bucket_shift;     // 用于提取高位: hash >> bucket_shift
+//         uint32_t padding;
+//         uint64_t total_size_bytes;
+//         uint64_t magic;
+//     };
 
-    struct Header {
-        uint64_t bucket_mask;      // Control Table 的掩码 (size - 1)
-        uint64_t slot_mask;        // Data Table 的掩码 (size - 1)
-        uint32_t bucket_shift;     // 用于提取高位: hash >> bucket_shift
-        uint32_t padding;
-        uint64_t total_size_bytes;
-        uint64_t magic;
-    };
+// private:
+//     const uint8_t* base_ptr = nullptr;
+//     const Header* header = nullptr;
+//     const uint64_t* control_table = nullptr; // 存储 64位 Seed
+//     const uint64_t* key_table = nullptr;     // SoA: 纯 Key 数组
+//     const T* value_table = nullptr;          // SoA: 纯 Value 数组
 
-private:
-    const uint8_t* base_ptr = nullptr;
-    const Header* header = nullptr;
-    const uint64_t* control_table = nullptr; // 存储 64位 Seed
-    const uint64_t* key_table = nullptr;     // SoA: 纯 Key 数组
-    const T* value_table = nullptr;          // SoA: 纯 Value 数组
+//     static uint64_t next_pow2(uint64_t x) {
+//         if (x == 0) return 1;
+//         x--;
+//         x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+//         return x + 1;
+//     }
 
-    // 辅助: 计算下一个 2 的幂
-    static uint64_t next_pow2(uint64_t x) {
-        if (x == 0) return 1;
-        x--;
-        x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
-        return x + 1;
-    }
+// public:
+//     ExtremePerfectMap() = default;
 
-public:
-    ExtremePerfectMap() = default;
-
-    // -------------------------------------------------------------------------
-    // 加载 (Zero-Copy)
-    // -------------------------------------------------------------------------
-    void load_from_memory(const void* ptr, size_t size) {
-        base_ptr = reinterpret_cast<const uint8_t*>(ptr);
-        header = reinterpret_cast<const Header*>(base_ptr);
+//     void load_from_memory(const void* ptr, size_t size) {
+//         base_ptr = reinterpret_cast<const uint8_t*>(ptr);
+//         header = reinterpret_cast<const Header*>(base_ptr);
         
-        // 建议内核使用大页 (Huge Pages)
-        madvise(const_cast<void*>(ptr), size, MADV_HUGEPAGE | MADV_WILLNEED);
+//         madvise(const_cast<void*>(ptr), size, MADV_HUGEPAGE | MADV_WILLNEED);
 
-        if (header->magic != MAGIC_CODE) {
-            throw std::runtime_error("Invalid magic");
-        }
+//         if (header->magic != MAGIC_CODE) {
+//             throw std::runtime_error("Invalid magic");
+//         }
         
-        if (header->total_size_bytes > size) {
-            throw std::runtime_error("Buffer too small");
-        }
+//         if (header->total_size_bytes > size) {
+//             throw std::runtime_error("Buffer too small");
+//         }
 
-        // 【核心修正】：必须使用与 build 相同的“相对偏移”计算逻辑
-        // 不要使用 (uintptr_t)curr % 64 这种绝对地址对齐，
-        // 因为 std::vector 的起始地址 base_ptr 不一定是 64 字节对齐的。
-        auto align64 = [](size_t s) { return (s + 63) & ~63; };
+//         auto align64 = [](size_t s) { return (s + 63) & ~63; };
 
-        size_t offset_ctrl = sizeof(Header);
-        size_t ctrl_sz     = (header->bucket_mask + 1) * sizeof(uint64_t);
+//         size_t offset_ctrl = sizeof(Header);
+//         size_t ctrl_sz     = (header->bucket_mask + 1) * sizeof(uint64_t);
         
-        size_t offset_keys = align64(offset_ctrl + ctrl_sz);
-        size_t key_sz      = (header->slot_mask + 1) * sizeof(uint64_t);
+//         size_t offset_keys = align64(offset_ctrl + ctrl_sz);
+//         size_t key_sz      = (header->slot_mask + 1) * sizeof(uint64_t);
         
-        size_t offset_vals = align64(offset_keys + key_sz);
+//         size_t offset_vals = align64(offset_keys + key_sz);
 
-        // 直接通过基地址 + 偏移量来定位
-        control_table = reinterpret_cast<const uint64_t*>(base_ptr + offset_ctrl);
-        key_table     = reinterpret_cast<const uint64_t*>(base_ptr + offset_keys);
-        value_table   = reinterpret_cast<const T*>(base_ptr + offset_vals);
-    }
+//         control_table = reinterpret_cast<const uint64_t*>(base_ptr + offset_ctrl);
+//         key_table     = reinterpret_cast<const uint64_t*>(base_ptr + offset_keys);
+//         value_table   = reinterpret_cast<const T*>(base_ptr + offset_vals);
+//     }
 
-    // -------------------------------------------------------------------------
-    // 极速查询 (Hot Path)
-    // -------------------------------------------------------------------------
-    // 强内联，无分支 (除了最后的校验)
-    __attribute__((always_inline)) const T* get(uint64_t key) const {
-        // 1. 单次强哈希
-        uint64_t h = HashCore::hash_one_pass(key);
 
-        // 2. 提取高位查 Control Table (Seed)
-        // 使用 Shift 提取高位，使用 AND 掩码作为索引
-        // bucket_shift 使得高位成为索引
-        uint64_t bucket_idx = h >> header->bucket_shift; 
-        
-        // [内存访问 1]: 读取 Seed (通常 L1/L2 Cache Hit)
-        uint64_t seed = control_table[bucket_idx];
+//     __attribute__((always_inline)) const T* get(uint64_t key) const {
+//         uint64_t h = HashCore::hash_one_pass(key);
+//         uint64_t bucket_idx = h >> header->bucket_shift; 
+//         uint64_t seed = control_table[bucket_idx];
+//         uint64_t slot_idx = (h ^ seed) & header->slot_mask;
 
-        // 3. XOR 映射得到 Slot (无第二次哈希计算!)
-        // 我们利用哈希的低位 (h) 与 Seed 进行异或，然后掩码到 Slot 范围
-        uint64_t slot_idx = (h ^ seed) & header->slot_mask;
+//         uint64_t stored_key = key_table[slot_idx];
+//         if (__builtin_expect(stored_key == key, 1)) {
+//             return &value_table[slot_idx];
+//         }
+//         return nullptr;
+//     }
 
-        // [内存访问 2]: 读取 Key (Cache Line 友好，只读 Key)
-        uint64_t stored_key = key_table[slot_idx];
+//     static std::vector<uint8_t> build(const std::vector<std::pair<uint64_t, T>>& data) {
+//         size_t n = data.size();
+//         if (n == 0) return {};
 
-        // 4. 校验与返回
-        // 使用 __builtin_expect 提示编译器大部分情况是找到了
-        if (__builtin_expect(stored_key == key, 1)) {
-            // [内存访问 3]: 仅在 Key 匹配时才去拉取 Value (节省带宽)
-            return &value_table[slot_idx];
-        }
+//         double slot_factor = 2.0;  // 初始两倍空间
+//         double bucket_factor = 0.8; // 桶的密度因子
 
-        return nullptr;
-    }
-
-    // -------------------------------------------------------------------------
-    // 暴力构建器 (Build Time doesn't matter!)
-    // -------------------------------------------------------------------------
-    // static std::vector<uint8_t> build(const std::vector<std::pair<uint64_t, T>>& data) {
-    //     size_t n = data.size();
-    //     if (n == 0) return {};
-
-    //     // 1. 确定大小 (强制 Power of 2)
-    //     // 为了降低 XOR 冲突概率，Slot 数量设为 N 的 2倍左右的 Power of 2
-    //     // Control Bucket 设为 N 的 0.5倍左右的 Power of 2 (Bucket越大，需要的Seed越难找)
-        
-    //     uint64_t slot_cnt = next_pow2(static_cast<uint64_t>(n * 2.0)); 
-        
-    //     // 兜底策略：如果数据量很少，强行给大一点，避免小数据下的碰撞
-    //     if (slot_cnt < 1024) slot_cnt = 1024; 
-
-    //     // 增加桶的数量，减少每个桶里的 Key 个数，让"找空位"更容易
-    //     // 原来是 n/4，现在改为 n/2
-    //     uint64_t bucket_cnt = next_pow2(n / 2); 
-    //     if (bucket_cnt < 4) bucket_cnt = 4;
-
-    //     // ---------------- [修改结束] ----------------
-
-    //     uint64_t bucket_mask = bucket_cnt - 1;
-    //     uint64_t slot_mask = slot_cnt - 1;
-        
-    //     // bucket_shift: 用来把 hash 的高位移下来做 index
-    //     // 假设 hash 是 64位。如果 bucket_cnt 是 1024 (10 bit)，我们需要高 10 bit。
-    //     // shift = 64 - 10 = 54。
-    //     int bucket_bits = 0;
-    //     while ((1ULL << bucket_bits) < bucket_cnt) bucket_bits++;
-    //     uint32_t bucket_shift = 64 - bucket_bits;
-
-    //     std::cout << "[Build] Keys: " << n << ", Buckets: " << bucket_cnt 
-    //               << ", Slots: " << slot_cnt << " (SoA Layout)" << std::endl;
-
-    //     // 2. 分桶
-    //     struct BucketInfo {
-    //         uint64_t id;
-    //         std::vector<uint64_t> keys; // 存 key
-    //     };
-    //     std::vector<BucketInfo> buckets(bucket_cnt);
-    //     for(uint64_t i=0; i<bucket_cnt; ++i) buckets[i].id = i;
-
-    //     for (const auto& kv : data) {
-    //         uint64_t h = HashCore::hash_one_pass(kv.first);
-    //         uint64_t b_idx = h >> bucket_shift;
-    //         buckets[b_idx].keys.push_back(kv.first);
-    //     }
-
-    //     // 3. 排序桶 (先处理大桶)
-    //     std::sort(buckets.begin(), buckets.end(), [](const auto& a, const auto& b){
-    //         return a.keys.size() > b.keys.size();
-    //     });
-
-    //     // 4. 暴力搜索 Seed
-    //     std::vector<uint64_t> control(bucket_cnt, 0);
-    //     std::vector<bool> slot_used(slot_cnt, false);
-        
-    //     // 临时存储构建好的映射，最后再写入 buffer
-    //     std::vector<uint64_t> final_keys(slot_cnt, 0); // 0 表示空或者 Key=0
-    //     // 为了区分空位和Key=0，我们可以初始化所有 Key 为一个不可能的值，
-    //     // 但这里为了简单，我们用 slot_used 标记。
-    //     // 注意：Value 不需要初始化，因为只有 Key 匹配才会去读 Value。
-    //     std::vector<T> final_values(slot_cnt);
-
-    //     // 随机数生成器用于生成 Seed
-    //     std::mt19937_64 rng(std::chrono::steady_clock::now().time_since_epoch().count());
-
-    //     for (const auto& bucket : buckets) {
-    //         if (bucket.keys.empty()) continue;
-
-    //         bool found = false;
-    //         // 疯狂尝试 Seed，因为不在乎构建时间，尝试次数可以很大
-    //         // XOR 方案相比乘法方案，冲突可能会多一点点，所以需要更多尝试
-    //         for (int attempt = 0; attempt < 10000000; ++attempt) {
-    //             uint64_t seed = rng(); // 随机 Seed
-    //             bool collision = false;
-    //             std::vector<uint64_t> proposed_slots;
-    //             proposed_slots.reserve(bucket.keys.size());
-
-    //             for (uint64_t k : bucket.keys) {
-    //                 uint64_t h = HashCore::hash_one_pass(k);
-    //                 // 核心逻辑: Slot = (Hash ^ Seed) & Mask
-    //                 uint64_t s_idx = (h ^ seed) & slot_mask;
-                    
-    //                 if (slot_used[s_idx]) { collision = true; break; }
-                    
-    //                 // 检查桶内自身冲突
-    //                 for(auto ps : proposed_slots) if(ps == s_idx) { collision = true; break; }
-    //                 if(collision) break;
-
-    //                 proposed_slots.push_back(s_idx);
-    //             }
-
-    //             if (!collision) {
-    //                 // 成功
-    //                 control[bucket.id] = seed;
-    //                 for (size_t i = 0; i < bucket.keys.size(); ++i) {
-    //                     uint64_t s_idx = proposed_slots[i];
-    //                     uint64_t original_key = bucket.keys[i];
-                        
-    //                     slot_used[s_idx] = true;
-    //                     final_keys[s_idx] = original_key;
-                        
-    //                     // 查找原始 Value (这里为了构建代码简单使用了线性查找，实际可用 map 辅助)
-    //                     // 假设 data 里 key 唯一
-    //                     for(const auto& input_kv : data) {
-    //                         if(input_kv.first == original_key) {
-    //                             final_values[s_idx] = input_kv.second;
-    //                             break;
-    //                         }
-    //                     }
-    //                 }
-    //                 found = true;
-    //                 break;
-    //             }
-    //         }
-    //         if (!found) {
-    //             std::cerr << "Build Failed: Need larger slot_cnt factor." << std::endl;
-    //             return {};
-    //         }
-    //     }
-
-    //     // 5. 序列化
-    //     size_t header_sz = sizeof(Header);
-    //     size_t ctrl_sz = bucket_cnt * sizeof(uint64_t);
-    //     size_t key_sz = slot_cnt * sizeof(uint64_t);
-    //     size_t val_sz = slot_cnt * sizeof(T);
-
-    //     // 简易对齐计算
-    //     auto align64 = [](size_t s) { return (s + 63) & ~63; };
-
-    //     size_t offset_ctrl = header_sz;
-    //     size_t offset_keys = align64(offset_ctrl + ctrl_sz);
-    //     size_t offset_vals = align64(offset_keys + key_sz);
-    //     size_t total_sz = offset_vals + val_sz;
-
-    //     std::vector<uint8_t> buffer(total_sz);
-    //     uint8_t* base = buffer.data();
-
-    //     Header* h = reinterpret_cast<Header*>(base);
-    //     h->bucket_mask = bucket_mask;
-    //     h->slot_mask = slot_mask;
-    //     h->bucket_shift = bucket_shift;
-    //     h->total_size_bytes = total_sz;
-    //     h->magic = MAGIC_CODE; // Marker
-
-    //     memcpy(base + offset_ctrl, control.data(), ctrl_sz);
-    //     memcpy(base + offset_keys, final_keys.data(), key_sz);
-    //     memcpy(base + offset_vals, final_values.data(), val_sz);
-
-    //     return buffer;
-    // }
-
-    // -------------------------------------------------------------------------
-    // 智能构建器 (自动扩容版)
-    // -------------------------------------------------------------------------
-    static std::vector<uint8_t> build(const std::vector<std::pair<uint64_t, T>>& data) {
-        size_t n = data.size();
-        if (n == 0) return {};
-
-        // 初始配置: 
-        // 1. Bucket 越多，每个 Bucket 里的 Key 越少，越容易解决冲突。建议 N / 0.7 左右
-        // 2. Slot 越多，空位越多，XOR 命中空位的概率越高。建议 N * 2.0 起步
-        
-        double slot_factor = 2.0;  // 初始两倍空间
-        double bucket_factor = 0.8; // 桶的密度因子
-
-        // --- [修改点] 自适应重试循环 ---
-        while (true) {
-            uint64_t slot_cnt = next_pow2(static_cast<uint64_t>(n * slot_factor));
-            if (slot_cnt < 1024) slot_cnt = 1024;
+//         while (true) {
+//             uint64_t slot_cnt = next_pow2(static_cast<uint64_t>(n * slot_factor));
+//             if (slot_cnt < 1024) slot_cnt = 1024;
             
-            // 保证 bucket 数量也随之合理调整 (通常 bucket = slot / 4 或 slot / 2 效果较好)
-            uint64_t bucket_cnt = next_pow2(static_cast<uint64_t>(n * bucket_factor)); 
-            if (bucket_cnt < 4) bucket_cnt = 4;
+//             uint64_t bucket_cnt = next_pow2(static_cast<uint64_t>(n * bucket_factor)); 
+//             if (bucket_cnt < 4) bucket_cnt = 4;
 
-            // 打印本次尝试的参数
-            std::cout << "[Build] Trying... Keys:" << n 
-                      << " Buckets:" << bucket_cnt 
-                      << " Slots:" << slot_cnt 
-                      << " (Load Factor: " << std::fixed << std::setprecision(1) 
-                      << (double)n/slot_cnt*100 << "%)" << std::endl;
+//             std::cout << "[Build] Trying... Keys:" << n 
+//                       << " Buckets:" << bucket_cnt 
+//                       << " Slots:" << slot_cnt 
+//                       << " (Load Factor: " << std::fixed << std::setprecision(1) 
+//                       << (double)n/slot_cnt*100 << "%)" << std::endl;
 
-            // 1. 准备掩码
-            uint64_t bucket_mask = bucket_cnt - 1;
-            uint64_t slot_mask = slot_cnt - 1;
-            int bucket_bits = 0;
-            while ((1ULL << bucket_bits) < bucket_cnt) bucket_bits++;
-            uint32_t bucket_shift = 64 - bucket_bits;
+//             // 1. 准备掩码
+//             uint64_t bucket_mask = bucket_cnt - 1;
+//             uint64_t slot_mask = slot_cnt - 1;
+//             int bucket_bits = 0;
+//             while ((1ULL << bucket_bits) < bucket_cnt) {
+//                 bucket_bits +=1;
+//             };
+//             uint32_t bucket_shift = 64 - bucket_bits;
 
-            // 2. 分桶
-            struct BucketInfo {
-                uint64_t id;
-                std::vector<uint64_t> keys;
-            };
-            std::vector<BucketInfo> buckets(bucket_cnt);
-            for(uint64_t i=0; i<bucket_cnt; ++i) buckets[i].id = i;
+//             // 2. 分桶
+//             struct BucketInfo {
+//                 uint64_t id;
+//                 std::vector<uint64_t> keys;
+//             };
+//             std::vector<BucketInfo> buckets(bucket_cnt);
+//             for(uint64_t i=0; i<bucket_cnt; ++i) {
+//                 buckets[i].id = i;
+//             };
 
-            for (const auto& kv : data) {
-                uint64_t h = HashCore::hash_one_pass(kv.first);
-                uint64_t b_idx = h >> bucket_shift;
-                buckets[b_idx].keys.push_back(kv.first);
-            }
+//             for (const auto& kv : data) {
+//                 uint64_t h = HashCore::hash_one_pass(kv.first);
+//                 uint64_t b_idx = h >> bucket_shift;
+//                 buckets[b_idx].keys.push_back(kv.first);
+//             }
 
-            // 3. 排序 (大桶优先)
-            std::sort(buckets.begin(), buckets.end(), [](const auto& a, const auto& b){
-                return a.keys.size() > b.keys.size();
-            });
+//             // 3. 排序 (大桶优先)
+//             std::sort(buckets.begin(), buckets.end(), [](const auto& a, const auto& b){
+//                 return a.keys.size() > b.keys.size();
+//             });
 
-            // 4. 尝试寻找 Seed
-            std::vector<uint64_t> control(bucket_cnt, 0);
-            std::vector<bool> slot_used(slot_cnt, false);
-            std::vector<uint64_t> final_keys(slot_cnt, 0);
-            std::vector<T> final_values(slot_cnt);
+//             // 4. 尝试寻找 Seed
+//             std::vector<uint64_t> control(bucket_cnt, 0);
+//             std::vector<bool> slot_used(slot_cnt, false);
+//             std::vector<uint64_t> final_keys(slot_cnt, 0);
+//             std::vector<T> final_values(slot_cnt);
 
-            std::mt19937_64 rng(123456); // 固定种子方便调试，或者用 random_device
-            bool build_success = true;
+//             std::mt19937_64 rng(123456); // 固定种子方便调试，或者用 random_device
+//             bool build_success = true;
 
-            for (const auto& bucket : buckets) {
-                if (bucket.keys.empty()) continue;
+//             for (const auto& bucket : buckets) {
+//                 if (bucket.keys.empty()) continue;
 
-                bool found = false;
-                // 尝试次数
-                int max_attempts = 2000000; 
+//                 bool found = false;
+//                 // 尝试次数
+//                 int max_attempts = 2000000; 
                 
-                for (int attempt = 0; attempt < max_attempts; ++attempt) {
-                    uint64_t seed = rng();
-                    bool collision = false;
-                    std::vector<uint64_t> proposed_slots;
-                    proposed_slots.reserve(bucket.keys.size());
+//                 for (int attempt = 0; attempt < max_attempts; ++attempt) {
+//                     uint64_t seed = rng();
+//                     bool collision = false;
+//                     std::vector<uint64_t> proposed_slots;
+//                     proposed_slots.reserve(bucket.keys.size());
 
-                    for (uint64_t k : bucket.keys) {
-                        uint64_t h = HashCore::hash_one_pass(k);
-                        uint64_t s_idx = (h ^ seed) & slot_mask;
+//                     for (uint64_t k : bucket.keys) {
+//                         uint64_t h = HashCore::hash_one_pass(k);
+//                         uint64_t s_idx = (h ^ seed) & slot_mask;
                         
-                        if (slot_used[s_idx]) { collision = true; break; }
-                        for(auto ps : proposed_slots) if(ps == s_idx) { collision = true; break; }
-                        if(collision) break;
-                        proposed_slots.push_back(s_idx);
-                    }
+//                         if (slot_used[s_idx]) { collision = true; break; }
+//                         for(auto ps : proposed_slots) if(ps == s_idx) { collision = true; break; }
+//                         if(collision) break;
+//                         proposed_slots.push_back(s_idx);
+//                     }
 
-                    if (!collision) {
-                        control[bucket.id] = seed;
-                        for (size_t i = 0; i < bucket.keys.size(); ++i) {
-                            uint64_t s_idx = proposed_slots[i];
-                            slot_used[s_idx] = true;
-                            final_keys[s_idx] = bucket.keys[i];
+//                     if (!collision) {
+//                         control[bucket.id] = seed;
+//                         for (size_t i = 0; i < bucket.keys.size(); ++i) {
+//                             uint64_t s_idx = proposed_slots[i];
+//                             slot_used[s_idx] = true;
+//                             final_keys[s_idx] = bucket.keys[i];
                             
-                            // 线性查找 value (为了简化代码)
-                            for(const auto& input_kv : data) {
-                                if(input_kv.first == bucket.keys[i]) {
-                                    final_values[s_idx] = input_kv.second;
-                                    break;
-                                }
-                            }
-                        }
-                        found = true;
-                        break;
-                    }
-                }
+//                             // 线性查找 value (为了简化代码)
+//                             for(const auto& input_kv : data) {
+//                                 if(input_kv.first == bucket.keys[i]) {
+//                                     final_values[s_idx] = input_kv.second;
+//                                     break;
+//                                 }
+//                             }
+//                         }
+//                         found = true;
+//                         break;
+//                     }
+//                 }
                 
-                if (!found) {
-                    build_success = false;
-                    break; // 当前 bucket 失败，直接放弃这一轮
-                }
-            }
+//                 if (!found) {
+//                     build_success = false;
+//                     break; // 当前 bucket 失败，直接放弃这一轮
+//                 }
+//             }
 
-            if (build_success) {
-                // --- 构建成功，开始序列化 ---
-                size_t header_sz = sizeof(Header);
-                size_t ctrl_sz = bucket_cnt * sizeof(uint64_t);
-                size_t key_sz = slot_cnt * sizeof(uint64_t);
-                size_t val_sz = slot_cnt * sizeof(T);
-                auto align64 = [](size_t s) { return (s + 63) & ~63; };
+//             if (build_success) {
+//                 // --- 构建成功，开始序列化 ---
+//                 size_t header_sz = sizeof(Header);
+//                 size_t ctrl_sz = bucket_cnt * sizeof(uint64_t);
+//                 size_t key_sz = slot_cnt * sizeof(uint64_t);
+//                 size_t val_sz = slot_cnt * sizeof(T);
+//                 auto align64 = [](size_t s) { return (s + 63) & ~63; };
 
-                size_t offset_ctrl = header_sz;
-                size_t offset_keys = align64(offset_ctrl + ctrl_sz);
-                size_t offset_vals = align64(offset_keys + key_sz);
-                size_t total_sz = offset_vals + val_sz;
+//                 size_t offset_ctrl = header_sz;
+//                 size_t offset_keys = align64(offset_ctrl + ctrl_sz);
+//                 size_t offset_vals = align64(offset_keys + key_sz);
+//                 size_t total_sz = offset_vals + val_sz;
 
-                std::vector<uint8_t> buffer(total_sz);
-                uint8_t* base = buffer.data();
-                Header* h = reinterpret_cast<Header*>(base);
-                h->bucket_mask = bucket_mask;
-                h->slot_mask = slot_mask;
-                h->bucket_shift = bucket_shift;
-                h->total_size_bytes = total_sz;
-                h->magic = MAGIC_CODE;
+//                 std::vector<uint8_t> buffer(total_sz);
+//                 uint8_t* base = buffer.data();
+//                 Header* h = reinterpret_cast<Header*>(base);
+//                 h->bucket_mask = bucket_mask;
+//                 h->slot_mask = slot_mask;
+//                 h->bucket_shift = bucket_shift;
+//                 h->total_size_bytes = total_sz;
+//                 h->magic = MAGIC_CODE;
 
-                memcpy(base + offset_ctrl, control.data(), ctrl_sz);
-                memcpy(base + offset_keys, final_keys.data(), key_sz);
-                memcpy(base + offset_vals, final_values.data(), val_sz);
+//                 memcpy(base + offset_ctrl, control.data(), ctrl_sz);
+//                 memcpy(base + offset_keys, final_keys.data(), key_sz);
+//                 memcpy(base + offset_vals, final_values.data(), val_sz);
                 
-                std::cout << "[Build] Success! Final Load Factor: " 
-                          << (double)n/slot_cnt*100 << "%" << std::endl;
-                return buffer;
+//                 std::cout << "[Build] Success! Final Load Factor: " 
+//                           << (double)n/slot_cnt*100 << "%" << std::endl;
+//                 return buffer;
 
-            } else {
-                // --- 构建失败，扩容重试 ---
-                std::cout << "[Build] Retry: Increasing capacity..." << std::endl;
-                slot_factor *= 1.5;   // 激进扩容
-                bucket_factor *= 1.2; // 桶也稍微增加一点
+//             } else {
+//                 std::cout << "[Build] Retry: Increasing capacity..." << std::endl;
+//                 slot_factor *= 1.5;
+//                 bucket_factor *= 1.2;
 
-                // 安全阀：如果扩容到太离谱（比如 20倍），就停止
-                if (slot_factor > 20.0) {
-                    std::cerr << "[Fatal] Cannot build perfect hash even with huge space." << std::endl;
-                    return {};
-                }
-            }
-        }
-    }
+//                 if (slot_factor > 20.0) {
+//                     std::cerr << "[Fatal] Cannot build perfect hash even with huge space." << std::endl;
+//                     return {};
+//                 }
+//             }
+//         }
+//     }
     
-    static const uint64_t MAGIC_CODE = 0x8899AABBCCDDEEFF;
-};
-// 1. 防止编译器优化的黑魔法函数
-// 用于强制 CPU 必须读取变量，防止编译器把 lookups 循环优化没了
+//     static const uint64_t MAGIC_CODE = 0x8899AABBCCDDEEFF;
+// };
+
+
+// template <typename T>
+// inline void do_not_optimize(T const& val) {
+//     asm volatile("" : : "g"(val) : "memory");
+// }
+
+// // 2. 示例业务数据结构 (POD 类型，适合共享内存)
+// struct MarketData {
+//     double price;      // 8 bytes
+//     uint32_t volume;   // 4 bytes
+//     char code[4];      // 4 bytes
+//     // Total: 16 bytes (刚好填满 1/4 个 Cache Line)
+// };
+
+
+// #include "unordered_dense.h"
+
+// int main() {
+//     auto u_map = ankerl::unordered_dense::map<uint64_t, MarketData>{};
+    
+//     const size_t N = 50'0000; // 测试规模: 200万个 Key
+//     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
+
+//     std::vector<std::pair<uint64_t, MarketData>> inputs;
+//     inputs.reserve(N);
+
+//     // 使用固定种子的随机数生成器，保证每次 Benchmark 数据一致
+//     std::mt19937_64 rng(12345);
+
+//     for(size_t i = 0; i < N; ++i) {
+//         MarketData d;
+//         d.price = 1000.0 + i * 0.1;
+//         d.volume = i;
+//         std::strncpy(d.code, "BTC", 4);
+        
+//         // 生成随机 Key (模拟 64位 OrderID 或 UserID)
+//         uint64_t key = rng();
+//         // 保证 Key 不为 0 (视具体实现而定，通常 0 留作空位标记)
+//         if (key == 0) key = 1; 
+        
+//         u_map[key] = d;
+//         inputs.push_back({key, d});
+//     }
+
+//     // ---------------------------------------------------------
+//     // 步骤 2: 构建阶段 (模拟“离线”生成数据文件)
+//     // ---------------------------------------------------------
+//     std::cout << "[Build] Building ExtremePerfectMap..." << std::endl;
+//     auto start_build = std::chrono::high_resolution_clock::now();
+
+//     // 调用构建函数 (注意: 之前我们修改了内部参数以空间换时间)
+//     auto buffer = ExtremePerfectMap<MarketData>::build(inputs);
+
+//     auto end_build = std::chrono::high_resolution_clock::now();
+//     double build_ms = std::chrono::duration<double, std::milli>(end_build - start_build).count();
+
+//     if (buffer.empty()) {
+//         std::cerr << "[Fatal] Build failed! Please increase slot_cnt multiplier." << std::endl;
+//         return 1;
+//     }
+
+//     std::cout << "  - Build Time: " << build_ms << " ms" << std::endl;
+//     std::cout << "  - Buffer Size: " << buffer.size() / 1024.0 / 1024.0 << " MB" << std::endl;
+
+//     // ---------------------------------------------------------
+//     // 步骤 3: 加载阶段 (模拟“在线”服务启动)
+//     // ---------------------------------------------------------
+//     ExtremePerfectMap<MarketData> map;
+//     try {
+//         // 这里模拟从 mmap 或者共享内存读取
+//         map.load_from_memory(buffer.data(), buffer.size());
+//     } catch (const std::exception& e) {
+//         std::cerr << "[Fatal] Load failed: " << e.what() << std::endl;
+//         return 1;
+//     }
+
+//     // ---------------------------------------------------------
+//     // 步骤 4: 性能压测 (Lookup Benchmark)
+//     // ---------------------------------------------------------
+//     std::cout << "[Bench] Starting Lookup Benchmark (Randomized/Cache-Miss)..." << std::endl;
+
+//     // 准备查询 Key 列表
+//     std::vector<uint64_t> lookups;
+//     lookups.reserve(N);
+//     for(const auto& p : inputs) {
+//         lookups.push_back(p.first);
+//     }
+    
+//     std::shuffle(lookups.begin(), lookups.end(), rng);
+
+//     // 预热 (可选，让 OS 分配物理页)
+//     map.get(lookups[0]); 
+
+//     auto start_lookup = std::chrono::high_resolution_clock::now();
+    
+//     uint64_t found_cnt = 0;
+    
+//     // 核心测试循环
+//     for(uint64_t k : lookups) {
+//         const MarketData* res = map.get(k);
+        
+//         // 使用 unlikely 提示编译器，虽然我们知道一定会命中，
+//         // 但我们要测试的是分支预测逻辑是否影响流水线
+//         if (__builtin_expect(res != nullptr, 1)) {
+//             found_cnt++;
+//             // 访问内存，确保 Cache Line 被加载
+//             do_not_optimize(res->price);
+//         }
+
+//         // auto res = u_map.find(k);
+//         // if (__builtin_expect(res != u_map.end(), 1)) {
+//         //     found_cnt++;
+//         //     do_not_optimize(res->second.price);
+//         // }
+//     }
+
+//     auto end_lookup = std::chrono::high_resolution_clock::now();
+//     auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_lookup - start_lookup).count();
+
+//     // ---------------------------------------------------------
+//     // 步骤 5: 结果报告
+//     // ---------------------------------------------------------
+//     double latency = (double)elapsed_ns / N;
+    
+//     std::cout << "========================================" << std::endl;
+//     std::cout << "Lookup Count : " << N << std::endl;
+//     std::cout << "Hit Count    : " << found_cnt << " / " << N << std::endl;
+//     std::cout << "Total Time   : " << elapsed_ns / 1000000.0 << " ms" << std::endl;
+//     std::cout << "Latency/Op   : " << latency << " ns " << (latency < 10.0 ? "(Extremely Fast!)" : "") << std::endl;
+//     std::cout << "========================================" << std::endl;
+
+//     // 校验完整性
+//     if (found_cnt != N) {
+//         std::cerr << "[Error] Data mismatch! Lost keys." << std::endl;
+//         return 1;
+//     }
+
+//     return 0;
+// }
+
+
+
+
+#include "./lib.hpp"
+
+
+
 template <typename T>
 inline void do_not_optimize(T const& val) {
     asm volatile("" : : "g"(val) : "memory");
 }
 
-// 2. 示例业务数据结构 (POD 类型，适合共享内存)
+
 struct MarketData {
     double price;      // 8 bytes
     uint32_t volume;   // 4 bytes
     char code[4];      // 4 bytes
-    // Total: 16 bytes (刚好填满 1/4 个 Cache Line)
 };
 
+
 int main() {
-    // ---------------------------------------------------------
-    // 步骤 1: 生成测试数据
-    // ---------------------------------------------------------
     const size_t N = 50'0000; // 测试规模: 200万个 Key
     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
 
@@ -820,12 +760,8 @@ int main() {
         d.price = 1000.0 + i * 0.1;
         d.volume = i;
         std::strncpy(d.code, "BTC", 4);
-        
-        // 生成随机 Key (模拟 64位 OrderID 或 UserID)
         uint64_t key = rng();
-        // 保证 Key 不为 0 (视具体实现而定，通常 0 留作空位标记)
         if (key == 0) key = 1; 
-        
         inputs.push_back({key, d});
     }
 
@@ -836,30 +772,8 @@ int main() {
     auto start_build = std::chrono::high_resolution_clock::now();
 
     // 调用构建函数 (注意: 之前我们修改了内部参数以空间换时间)
-    auto buffer = ExtremePerfectMap<MarketData>::build(inputs);
-
-    auto end_build = std::chrono::high_resolution_clock::now();
-    double build_ms = std::chrono::duration<double, std::milli>(end_build - start_build).count();
-
-    if (buffer.empty()) {
-        std::cerr << "[Fatal] Build failed! Please increase slot_cnt multiplier." << std::endl;
-        return 1;
-    }
-
-    std::cout << "  - Build Time: " << build_ms << " ms" << std::endl;
-    std::cout << "  - Buffer Size: " << buffer.size() / 1024.0 / 1024.0 << " MB" << std::endl;
-
-    // ---------------------------------------------------------
-    // 步骤 3: 加载阶段 (模拟“在线”服务启动)
-    // ---------------------------------------------------------
-    ExtremePerfectMap<MarketData> map;
-    try {
-        // 这里模拟从 mmap 或者共享内存读取
-        map.load_from_memory(buffer.data(), buffer.size());
-    } catch (const std::exception& e) {
-        std::cerr << "[Fatal] Load failed: " << e.what() << std::endl;
-        return 1;
-    }
+    shm_pm::ShmMapStorage<MarketData, 4> storage;
+    storage.create_new("test_pm", inputs);
 
     // ---------------------------------------------------------
     // 步骤 4: 性能压测 (Lookup Benchmark)
@@ -873,22 +787,18 @@ int main() {
         lookups.push_back(p.first);
     }
     
-    // 【关键】打乱顺序！
-    // 如果按插入顺序查询，内存访问会极其规律，被 CPU Prefetcher 优化，无法测出真实的最差延迟。
-    // 打乱后模拟的是真实的高频交易场景：随机到来的 OrderID 查询。
     std::shuffle(lookups.begin(), lookups.end(), rng);
-
-    // 预热 (可选，让 OS 分配物理页)
-    map.get(lookups[0]); 
 
     auto start_lookup = std::chrono::high_resolution_clock::now();
     
     uint64_t found_cnt = 0;
     
     // 核心测试循环
+    auto view = storage.get_view();
     for(uint64_t k : lookups) {
-        const MarketData* res = map.get(k);
+        // const MarketData* res = map.get(k);
         
+        auto res = view.get(k);
         // 使用 unlikely 提示编译器，虽然我们知道一定会命中，
         // 但我们要测试的是分支预测逻辑是否影响流水线
         if (__builtin_expect(res != nullptr, 1)) {
@@ -896,6 +806,12 @@ int main() {
             // 访问内存，确保 Cache Line 被加载
             do_not_optimize(res->price);
         }
+
+        // auto res = u_map.find(k);
+        // if (__builtin_expect(res != u_map.end(), 1)) {
+        //     found_cnt++;
+        //     do_not_optimize(res->second.price);
+        // }
     }
 
     auto end_lookup = std::chrono::high_resolution_clock::now();
