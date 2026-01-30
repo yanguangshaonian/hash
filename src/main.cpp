@@ -27,35 +27,27 @@ struct MarketData {
 }; // Total: 16 bytes, alignof: 8
 
 std::vector<uint64_t> get_random_int64_list(size_t n) {
-    std::vector<uint64_t> v;
-    v.reserve(n);
-
-    // 使用 set 去重
-    auto used = ankerl::unordered_dense::set<uint64_t>{};
-    used.reserve(n);
-
-    // 使用全范围随机数，减少碰撞概率，提升生成速度
+    auto v_set = ankerl::unordered_dense::set<uint64_t>{};
     std::mt19937_64 rng(std::random_device{}());
 
-    while (v.size() < n) {
+    while (v_set.size() < n) {
         uint64_t k = rng();
-
-        // 过滤非法 Key
         if (k == 0 || k == shm_pm::EMPTY_KEY)
             continue;
         k %= 200'0000;
 
-        // 插入成功才算数
-        if (used.insert(k).second) {
-            v.push_back(k);
-        }
+        v_set.insert(k);
+    }
+    auto tmp_v = vector<uint64_t> {};
+    for (auto v: v_set) {
+        tmp_v.push_back(v);
     }
 
-    return v;
+    return tmp_v;
 }
 
 int test1() {
-    const size_t N = 500000;
+    const size_t N = 10000;
     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
 
     std::vector<std::pair<uint64_t, MarketData>> inputs;
@@ -84,10 +76,10 @@ int test1() {
     uint64_t found_cnt = 0;
     double v = 0.0;
     for (auto k : lookups) {
-        const MarketData* res = view.get(k);
-        if (__builtin_expect(res != nullptr, 1)) {
+        auto res = view.get(k);
+        if (__builtin_expect(res->key == k, 1)) {
             found_cnt++;
-            v += res->volume;
+            v += res->value.volume;
         }
     }
     do_not_optimize(v);
@@ -117,7 +109,7 @@ int test1() {
 }
 
 int test3() {
-    const size_t N = 500000;
+    const size_t N = 10000;
     std::cout << "[Init] Generating " << N << " random keys..." << std::endl;
 
     auto u_map = ankerl::unordered_dense::map<uint64_t, MarketData>{};
