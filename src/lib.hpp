@@ -158,29 +158,10 @@ namespace shm_pm {
                 uint64_t seed = control_table[bucket_idx];
                 uint64_t slot_idx = (h ^ seed) & header->slot_mask;
 
-                // 分支预测优化: 假设命中
                 if (__builtin_expect(key_table[slot_idx] == key, 1)) {
                     return &value_table[slot_idx].value;
                 }
                 return nullptr;
-            }
-
-            // [写入] 带锁访问
-            template<class Accesser>
-            inline __attribute__((always_inline)) bool locked_access(uint64_t key, Accesser&& accesser) noexcept {
-                uint64_t h = HashCore::hash_one_pass(key);
-                uint64_t bucket_idx = h >> header->bucket_shift;
-                uint64_t seed = control_table[bucket_idx];
-                uint64_t slot_idx = (h ^ seed) & header->slot_mask;
-
-                if (key_table[slot_idx] == key) {
-                    auto& ref = value_table[slot_idx];
-                    ref.lock(false); // 强制获取锁
-                    accesser(ref.value);
-                    ref.unlock();
-                    return true;
-                }
-                return false;
             }
 
             size_t capacity() const {
@@ -315,15 +296,16 @@ namespace shm_pm {
             //         std::vector<T> values;
             // };
 
-            struct BuildResult {
-                bool success = false;
-                uint64_t bucket_mask = 0;
-                uint64_t slot_mask = 0;
-                uint32_t bucket_shift = 0;
-                std::vector<uint64_t> control;
-                std::vector<uint64_t> keys;
-                
-                std::vector<size_t> value_indices; 
+            class BuildResult {
+                public:
+                    bool success = false;
+                    uint64_t bucket_mask = 0;
+                    uint64_t slot_mask = 0;
+                    uint32_t bucket_shift = 0;
+                    std::vector<uint64_t> control;
+                    std::vector<uint64_t> keys;
+
+                    std::vector<size_t> value_indices;
             };
 
             // 完美哈希核心算法 (与原代码保持一致)
@@ -355,9 +337,10 @@ namespace shm_pm {
 
                 BuildResult res;
                 double slot_factor = 1.1;
-                double bucket_factor = 0.8;
+                double bucket_factor = 0.7;
 
-                struct BucketInfo {
+                class BucketInfo {
+                    public:
                         uint64_t id;
                         std::vector<size_t> data_indices;
                 };
@@ -413,9 +396,7 @@ namespace shm_pm {
                         std::vector<uint64_t> proposed_slots;
                         proposed_slots.reserve(bucket.data_indices.size());
 
-                        // [建议] 如果 slot_factor=2.0，通常 1000 次以内就能找到。
-                        // 如果你坚持用 1.15，这里确实需要 2000000，但请做好构建耗时 10s+ 的准备。
-                        for (int attempt = 0; attempt < 50000; attempt += 1) {
+                        for (int attempt = 0; attempt < 2000000; attempt += 1) {
                             uint64_t seed = rng();
                             if (seed == 0)
                                 seed = 1;
@@ -471,8 +452,8 @@ namespace shm_pm {
                         return res;
                     }
 
-                    slot_factor *= 1.2; // 失败后扩容
-                    bucket_factor *= 1.1;
+                    slot_factor *= 1.05; // 失败后扩容
+                    bucket_factor *= 1.05;
                     if (slot_factor > 10.0)
                         return {};
                 }
@@ -630,6 +611,36 @@ namespace shm_pm {
 
                 size_t total_sz = header_sz + ctrl_sz + key_sz + val_sz;
                 size_t aligned_file_sz = align_to_huge_page(total_sz);
+                size_t waste_sz = aligned_file_sz - total_sz;
+
+                {
+                    stringstream ss;
+                    ss << "开始创建共享内存 (Perfect Hash Map):\n"
+                       << "  名称            = " << this->storage_name << "\n"
+                       << "  逻辑数据量      = " << data.size() << " (实际写入)\n"
+                       << "  物理槽位数量    = " << build_res.keys.size() << " (Slot Count, Load Factor ≈ "
+                       << std::fixed << std::setprecision(2) << ((double) data.size() / build_res.keys.size()) << ")\n"
+                       << "  sizeof(T)       = " << sizeof(T) << " 字节\n"
+                       << "  sizeof(Padded)  = " << sizeof(PaddedValue<T, ALIGN>) << " 字节\n"
+                       << "  alignof(T)      = " << alignof(T) << "\n"
+                       << "  alignof(Padded) = " << alignof(PaddedValue<T, ALIGN>) << " (CacheLine=" << ALIGN << ")";
+                    log_msg("INFO", ss.str());
+                }
+
+                {
+                    stringstream ss;
+                    ss << "内存布局计算详情:\n"
+                       << "  [1] Header 区     = " << header_sz << " 字节\n"
+                       << "  [2] Control 表    = " << ctrl_sz << " 字节\n"
+                       << "  [3] Key 表        = " << key_sz << " 字节\n"
+                       << "  [4] Value 表      = " << val_sz << " 字节\n"
+                       << "  --------------------------------\n"
+                       << "  实际数据总大小    = " << total_sz << " 字节\n"
+                       << "  HugePage对齐后    = " << aligned_file_sz << " 字节\n"
+                       << "  对齐浪费空间      = " << waste_sz << " 字节 (" << std::fixed << std::setprecision(2)
+                       << (100.0 * waste_sz / aligned_file_sz) << "%)";
+                    log_msg("INFO", ss.str());
+                }
 
                 // 创建文件 (O_EXCL)
                 this->shm_fd = shm_open(this->storage_name.c_str(), O_CREAT | O_RDWR | O_EXCL, 0660);
@@ -683,32 +694,18 @@ namespace shm_pm {
                 std::memcpy(this->mapped_ptr + hdr->offset_keys, build_res.keys.data(),
                             build_res.keys.size() * sizeof(uint64_t));
 
-                // 构造 Value Table (PaddedValue)
-                // auto* val_ptr = reinterpret_cast<PaddedValue<T, ALIGN>*>(this->mapped_ptr + hdr->offset_values);
-                // for (size_t i = 0; i < build_res.values.size(); i += 1) {
-                //     new (&val_ptr[i]) PaddedValue<T, ALIGN>();
-                //     val_ptr[i].value = build_res.values[i];
-                //     val_ptr[i].unlock(); // 确保初始状态为 unlocked
-                // }
-
                 auto* val_ptr = reinterpret_cast<PaddedValue<T, ALIGN>*>(this->mapped_ptr + hdr->offset_values);
                 // 注意：遍历的是 slot (0 到 slot_count)
                 for (size_t i = 0; i < build_res.value_indices.size(); i += 1) {
                     size_t src_idx = build_res.value_indices[i];
-                    
+
                     // 构造对象
                     new (&val_ptr[i]) PaddedValue<T, ALIGN>();
-                    
+
                     if (src_idx != SIZE_MAX) {
-                        // [逻辑变更] 通过下标回溯 input data 获取 value
-                        // 这样避免了在 build_result 中存储一份巨大的 value 副本
                         val_ptr[i].value = data[src_idx].second;
-                    } else {
-                        // 空槽位，value 保持默认构造即可 (或 memset 0)
-                        // 只要 keys[i] == EMPTY_KEY，读取者就不会访问这里
                     }
-                    
-                    val_ptr[i].unlock(); 
+                    val_ptr[i].unlock();
                 }
 
                 // 发布 (Memory Barrier & Magic)
@@ -716,7 +713,13 @@ namespace shm_pm {
                 hdr->magic = MAGIC_CODE;
 
                 this->view.init(this->mapped_ptr);
-                log_msg("INFO", "成功创建并发布新的 SHM Map");
+                {
+                    stringstream ss;
+                    ss << "共享内存创建成功并已发布:\n"
+                       << "  映射总大小        = " << aligned_file_sz << " 字节 (" 
+                       << std::fixed << std::setprecision(2) << (aligned_file_sz / 1024.0 / 1024.0) << " MB)";
+                    log_msg("INFO", ss.str());
+                }
                 return true;
             }
 
@@ -737,11 +740,11 @@ namespace shm_pm {
                     }
 
                     if (join_res == JoinResult::TYPE_MISMATCH) {
-                        throw std::runtime_error("SHM 版本不匹配");
+                        throw std::runtime_error("共享内存数据结构版本不匹配");
                     }
 
                     if (join_res == JoinResult::DATA_CORRUPT) {
-                        log_msg("WARN", "文件损坏，重试...");
+                        log_msg("WARN", "检测到损坏的文件，已删除并重试创建...");
                         continue;
                     }
 
@@ -752,13 +755,14 @@ namespace shm_pm {
 
                     // 处理并发竞争 (EEXIST)
                     if (errno == EEXIST) {
+                        log_msg("WARN", "检测到并发竞争 (EEXIST)，正在重试 join...");
                         std::this_thread::sleep_for(std::chrono::milliseconds(20));
                         continue;
                     }
 
-                    throw std::runtime_error("SHM Error: " + std::string(strerror(errno)));
+                    throw std::runtime_error("shm_open 致命错误: " + string(strerror(errno)));
                 }
-                throw std::runtime_error("初始化超时");
+                throw std::runtime_error("由于严重的并发竞争，初始化超时");
             }
 
             inline SharedMapView<T, ALIGN>& get_view() {
