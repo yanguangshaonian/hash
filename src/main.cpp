@@ -729,6 +729,7 @@
 
 
 #include "./lib.hpp"
+#include <string>
 
 
 
@@ -773,7 +774,7 @@ int main() {
 
     // 调用构建函数 (注意: 之前我们修改了内部参数以空间换时间)
     shm_pm::ShmMapStorage<MarketData, 4> storage;
-    storage.create_new("test_pm", inputs);
+    storage.build("test_pm1", inputs);
 
     // ---------------------------------------------------------
     // 步骤 4: 性能压测 (Lookup Benchmark)
@@ -795,6 +796,7 @@ int main() {
     
     // 核心测试循环
     auto view = storage.get_view();
+    auto v = 0.0;
     for(uint64_t k : lookups) {
         // const MarketData* res = map.get(k);
         
@@ -804,7 +806,7 @@ int main() {
         if (__builtin_expect(res != nullptr, 1)) {
             found_cnt++;
             // 访问内存，确保 Cache Line 被加载
-            do_not_optimize(res->price);
+            v += res->price;
         }
 
         // auto res = u_map.find(k);
@@ -823,7 +825,9 @@ int main() {
     double latency = (double)elapsed_ns / N;
     
     std::cout << "========================================" << std::endl;
+    
     std::cout << "Lookup Count : " << N << std::endl;
+    std::cout << "v : " << std::to_string(v) << std::endl;
     std::cout << "Hit Count    : " << found_cnt << " / " << N << std::endl;
     std::cout << "Total Time   : " << elapsed_ns / 1000000.0 << " ms" << std::endl;
     std::cout << "Latency/Op   : " << latency << " ns " << (latency < 10.0 ? "(Extremely Fast!)" : "") << std::endl;
