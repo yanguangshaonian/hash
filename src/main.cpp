@@ -458,8 +458,6 @@ public:
         // 我们利用哈希的低位 (h) 与 Seed 进行异或，然后掩码到 Slot 范围
         uint64_t slot_idx = (h ^ seed) & header->slot_mask;
 
-        _mm_prefetch(reinterpret_cast<const char*>(&value_table[slot_idx]), _MM_HINT_T0);
-        
         // [内存访问 2]: 读取 Key (Cache Line 友好，只读 Key)
         uint64_t stored_key = key_table[slot_idx];
 
