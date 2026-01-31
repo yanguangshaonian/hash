@@ -68,7 +68,7 @@ int test1() {
         inputs.push_back({v, d});
     }
 
-    shm_pm::ShmMapStorage<MarketData, 8> storage;
+    shm_pm::ShmMapStorage<MarketData, uint8_t, 8> storage;
     storage.build("test_pm1", inputs);
     auto& view = storage.get_view();
 
@@ -80,7 +80,7 @@ int test1() {
     uint64_t found_cnt = 0;
     double v = 0.0;
     for (auto i = 0; i < 10; i += 1) {
-        for (auto k : random_lis) {
+        for (auto k : lookups) {
             auto res = view.get(k);
             if (__builtin_expect(res->key == k, 1)) {
                 found_cnt++;
@@ -172,7 +172,7 @@ int test3() {
     uint64_t found_cnt = 0;
     double v = 0.0;
     for (auto i = 0; i < 10; i += 1) {
-        for (uint64_t k : random_lis) {
+        for (uint64_t k : lookups) {
             auto p = u_map.find(k);
             if (p != u_map.end()) {
                 found_cnt++;

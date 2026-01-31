@@ -118,13 +118,13 @@ namespace shm_pm {
     // ----------------------------------------------------------------
     // 映射视图(View) - 极速访问路径
     // ----------------------------------------------------------------
-    template<class T, size_t ALIGN = CACHE_LINE_SIZE> class SharedMapView {
+    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE> class SharedMapView {
         private:
             const uint8_t* base_ptr = nullptr;
             const ShmMapHeader* header = nullptr;
 
             // 指针缓存
-            const uint32_t* __restrict control_table = nullptr;
+            const ControlType* __restrict control_table = nullptr;
             const uint32_t* __restrict index_map = nullptr;
             const PaddedSlot<T, ALIGN>* __restrict slot_table = nullptr;
 
@@ -165,7 +165,7 @@ namespace shm_pm {
                 local_bucket_shift = header->bucket_shift;
                 local_slot_mask = static_cast<uint32_t>(header->slot_mask);
 
-                control_table = reinterpret_cast<const uint32_t*>(base_ptr + header->offset_control);
+                control_table = reinterpret_cast<const ControlType*>(base_ptr + header->offset_control);
                 if (header->offset_index_map > 0) {
                     index_map = reinterpret_cast<const uint32_t*>(base_ptr + header->offset_index_map);
                 }
@@ -175,7 +175,7 @@ namespace shm_pm {
 
             __attribute__((always_inline)) const PaddedSlot<T, ALIGN>* get(uint64_t key) const {
                 auto h = HashCore::hash_one_pass(key);
-                uint32_t seed = control_table[h >> local_bucket_shift];
+                ControlType seed = control_table[h >> local_bucket_shift];
                 uint32_t slot_idx = (static_cast<uint32_t>(h) ^ seed) & local_slot_mask;
                 return &slot_table[slot_idx];
             }
@@ -197,7 +197,7 @@ namespace shm_pm {
     // ----------------------------------------------------------------
     // 存储管理器
     // ----------------------------------------------------------------
-    template<class T, size_t ALIGN = CACHE_LINE_SIZE> class ShmMapStorage {
+    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE> class ShmMapStorage {
         private:
             enum class JoinResult {
                 SUCCESS,
@@ -211,7 +211,7 @@ namespace shm_pm {
             uint8_t* mapped_ptr = nullptr;
             uint64_t mapped_size = 0;
             std::string storage_name;
-            SharedMapView<T, ALIGN> view;
+            SharedMapView<T, ControlType, ALIGN> view;
 
             using SlotType = PaddedSlot<T, ALIGN>;
 
@@ -306,7 +306,7 @@ namespace shm_pm {
                     uint64_t bucket_mask = 0;
                     uint32_t slot_mask = 0;
                     uint32_t bucket_shift = 0;
-                    std::vector<uint32_t> control;
+                    std::vector<ControlType> control;
                     std::vector<uint32_t> index_map;
                     std::vector<uint64_t> keys;
                     std::vector<size_t> value_indices;
@@ -480,7 +480,7 @@ namespace shm_pm {
                         auto max_bucket_attempts = 1048576;
 
                         for (auto attempt = 0; attempt < max_bucket_attempts; attempt += 1) {
-                            uint32_t seed = rng();
+                            ControlType seed = static_cast<uint16_t>(rng());
                             if (seed == 0) {
                                 seed = 1;
                             }
@@ -569,7 +569,7 @@ namespace shm_pm {
 
                 // 计算内存布局: Header + Control + Slots(Key+Value)
                 size_t header_sz = align_to_cache_line(sizeof(ShmMapHeader));
-                size_t ctrl_sz = align_to_cache_line(build_res.control.size() * sizeof(uint32_t));
+                size_t ctrl_sz = align_to_cache_line(build_res.control.size() * sizeof(ControlType));
                 size_t idx_map_sz = align_to_cache_line(build_res.index_map.size() * sizeof(uint32_t));
 
                 // Key 表消失了, 合并进了 Slot
@@ -651,7 +651,7 @@ namespace shm_pm {
 
                 // 写入 Control
                 std::memcpy(this->mapped_ptr + hdr->offset_control, build_res.control.data(),
-                            build_res.control.size() * sizeof(uint32_t));
+                            build_res.control.size() * sizeof(ControlType));
 
                 // 写入 Index Map
                 std::memcpy(this->mapped_ptr + hdr->offset_index_map, build_res.index_map.data(),
@@ -723,7 +723,7 @@ namespace shm_pm {
                 throw std::runtime_error("初始化超时");
             }
 
-            __attribute__((always_inline)) inline SharedMapView<T, ALIGN>& get_view() {
+            __attribute__((always_inline)) inline SharedMapView<T, ControlType, ALIGN>& get_view() {
                 return this->view;
             }
 
