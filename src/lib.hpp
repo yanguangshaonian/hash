@@ -53,7 +53,8 @@ namespace shm_pm {
     // ----------------------------------------------------------------
     // 并发安全的数据单元
     // ----------------------------------------------------------------
-    template<class T, size_t ALIGN> class alignas(ALIGN) PaddedSlot {
+    template<class T, size_t ALIGN>
+    class alignas(ALIGN) PaddedSlot {
         public:
             uint64_t key;
             T value;
@@ -118,7 +119,8 @@ namespace shm_pm {
     // ----------------------------------------------------------------
     // 映射视图(View) - 极速访问路径
     // ----------------------------------------------------------------
-    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE> class SharedMapView {
+    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE>
+    class SharedMapView {
         private:
             const uint8_t* base_ptr = nullptr;
             const ShmMapHeader* header = nullptr;
@@ -137,13 +139,16 @@ namespace shm_pm {
                 public:
                     const SharedMapView* view;
                     size_t index;
+
                     const PaddedSlot<T, ALIGN>& operator*() const {
                         return *view->at(index);
                     }
+
                     Iterator& operator++() {
-                        index+=1;
+                        index += 1;
                         return *this;
                     }
+
                     bool operator!=(const Iterator& other) const {
                         return index != other.index;
                     }
@@ -197,7 +202,8 @@ namespace shm_pm {
     // ----------------------------------------------------------------
     // 存储管理器
     // ----------------------------------------------------------------
-    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE> class ShmMapStorage {
+    template<class T, class ControlType, size_t ALIGN = CACHE_LINE_SIZE>
+    class ShmMapStorage {
         private:
             enum class JoinResult {
                 SUCCESS,
@@ -390,8 +396,8 @@ namespace shm_pm {
                 }
 
                 BuildResult res;
-                auto slot_factor = 1.15;
-                auto bucket_factor = 0.95;
+                auto slot_factor = 1.03;
+                auto bucket_factor = 0.90;
 
                 // 桶信息
                 class BucketInfo {
@@ -400,6 +406,9 @@ namespace shm_pm {
                         std::vector<size_t> data_indices;
                 };
 
+                const int MAX_RETRIES_AT_LEVEL = 10;
+                int retries_at_level = 0;
+
                 auto start_time = std::chrono::steady_clock::now();
                 auto last_log_time = start_time;
                 size_t attempt_count = 0;
@@ -407,16 +416,6 @@ namespace shm_pm {
                 while (true) {
                     attempt_count += 1;
                     auto now = std::chrono::steady_clock::now();
-
-                    // 每秒输出心跳日志
-                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log_time).count() >= 1) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-                        std::stringstream ss;
-                        ss << "构建中... [耗时:" << elapsed << "s] [重试:" << attempt_count << "] "
-                           << "[扩容:" << std::fixed << std::setprecision(2) << slot_factor << "x]";
-                        log_msg("INFO", ss.str());
-                        last_log_time = now;
-                    }
 
                     // 计算表大小(2的幂次对齐)
                     uint64_t slot_cnt = next_pow2(static_cast<uint64_t>(n * slot_factor));
@@ -429,14 +428,28 @@ namespace shm_pm {
                         bucket_cnt = 4;
                     }
 
+                    // 设置 Mask
                     res.bucket_mask = bucket_cnt - 1;
                     res.slot_mask = slot_cnt - 1;
 
+                    // 计算 Shift
                     auto bucket_bits = 0;
                     while ((1ULL << bucket_bits) < bucket_cnt) {
                         bucket_bits += 1;
                     }
                     res.bucket_shift = 64 - bucket_bits;
+
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log_time).count() >= 1) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+                        std::stringstream ss;
+                        ss << "构建中... [耗时:" << elapsed << "s] [总尝试:" << attempt_count << "] "
+                           << "[重试计数:" << retries_at_level << "/" << MAX_RETRIES_AT_LEVEL << "] "
+                           << "[因子:" << std::fixed << std::setprecision(3) << slot_factor << "x] "
+                           << "[Slot大小:" << slot_cnt << "]";
+                        log_msg("INFO", ss.str());
+                        last_log_time = now;
+                    }
+
 
                     // 分桶(Mapping)
                     std::vector<BucketInfo> buckets(bucket_cnt);
@@ -462,11 +475,10 @@ namespace shm_pm {
 
                     std::vector<bool> slot_used(slot_cnt, false);
 
-                    // 使用 attempt_count 扰动随机种子，确保每次重试都不一样
-                    std::mt19937 rng(123456 + attempt_count);
+                    // 随机种子，确保每次重试都不一样
+                    std::mt19937 rng(std::random_device{}());
 
-                    bool success = true;
-
+                    auto success = true;
                     // 为每个桶寻找 Perfect Seed
                     for (const auto& bucket : buckets) {
                         if (bucket.data_indices.empty()) {
@@ -546,13 +558,19 @@ namespace shm_pm {
                         return res;
                     }
 
-                    // 每次微调 5%，逐步逼近最优解
-                    slot_factor *= 1.05;
-                    bucket_factor *= 1.05;
+                    if (retries_at_level < MAX_RETRIES_AT_LEVEL) {
+                        retries_at_level += 1;
+                    } else {
+                        // 当前大小尝试了 MAX_RETRIES 次仍失败，只能扩容
+                        retries_at_level = 0;
+                        slot_factor *= 1.03;
+                        bucket_factor *= 1.03;
 
-                    if (slot_factor > 5.0) {
-                        log_msg("ERROR", "构建失败: 空间因子超过 5.0x 仍无法收敛，请检查数据分布是否极度畸形。");
-                        return {};
+                        // 熔断保护
+                        if (slot_factor > 8.0) {
+                            log_msg("ERROR", "构建失败: 空间因子无法收敛");
+                            return {};
+                        }
                     }
                 }
             }
